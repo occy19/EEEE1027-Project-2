@@ -1,0 +1,105 @@
+#PW2 Symbol Detection - Hu Moment and Kan Ni Nia
+
+
+import cv2
+import numpy as np
+import os
+import sys
+from picamera2 import Picamera2
+
+# -----------------------------
+# 1. Load EVERY Sample (KNN style)
+# -----------------------------
+files = [
+    "075circle.npy", "diamond.npy", "qr.npy", "recycle.npy", "star.npy",
+    "cross.npy", "fingerprint.npy", "octagon.npy", "trapezium.npy",
+    "caution.npy", "up arrow.npy", "down arrow.npy", "left arrow.npy",
+    "right arrow.npy", "chord.npy","hand.npy"
+]
+
+all_features = []
+all_labels = []
+
+print("--- Loading All Samples ---")
+for f in files:
+    if os.path.exists(f):
+        data = np.load(f)
+        label = f.replace(".npy", "")
+        for sample in data:
+            all_features.append(sample)
+            all_labels.append(label)
+        print(f"Loaded {label}: {len(data)} samples")
+
+if not all_features:
+    print("ERROR: No data found.")
+    sys.exit(1)
+
+# Convert to numpy for fast math
+all_features = np.array(all_features)
+
+# -----------------------------
+# 2. Camera Setup
+# -----------------------------
+picam2 = Picamera2()
+picam2.start()
+
+while True:
+    frame = picam2.capture_array()
+    gray = cv2.cvtColor(frame, cv2.COLOR_BGR2GRAY)
+    blur = cv2.GaussianBlur(gray, (5, 5), 0)
+    thresh = cv2.adaptiveThreshold(
+        blur, 255, cv2.ADAPTIVE_THRESH_GAUSSIAN_C,
+        cv2.THRESH_BINARY_INV, 11, 2
+    )
+
+    contours, _ = cv2.findContours(thresh, cv2.RETR_EXTERNAL, cv2.CHAIN_APPROX_SIMPLE)
+
+    hu_collection = []
+    valid_cnts = []
+
+    for cnt in contours:
+        if cv2.contourArea(cnt) > 1000:
+            M = cv2.moments(cnt)
+            if M["m00"] == 0: continue
+            
+            # Use your exact stability trick
+            hu = cv2.HuMoments(M).flatten()
+            hu_log = np.zeros(7)
+            for i in range(7):
+                hu_log[i] = -np.sign(hu[i]) * np.log10(abs(hu[i]) + 1e-10)
+            
+            hu_collection.append(hu_log)
+            valid_cnts.append(cnt)
+
+    if len(hu_collection) > 0:
+        live_avg = np.mean(np.array(hu_collection), axis=0)
+
+        # --- KNN COMPARISON ---
+        # Calculate distance to EVERY single sample we ever saved
+        distances = np.linalg.norm(all_features - live_avg, axis=1)
+        
+        # Find the index of the closest sample
+        closest_idx = np.argmin(distances)
+        best_match = all_labels[closest_idx]
+        min_dist = distances[closest_idx]
+
+        # Confidence logic
+        if min_dist < 2.0: # Adjusted threshold for KNN
+            color = (0, 255, 0)
+            display_text = f"{best_match.upper()}"
+        else:
+            color = (0, 0, 255)
+            display_text = "UNCERTAIN"
+
+        # Display
+        all_pts = np.vstack(valid_cnts)
+        x, y, w, h = cv2.boundingRect(all_pts)
+        cv2.drawContours(frame, valid_cnts, -1, color, 2)
+        cv2.putText(frame, display_text, (x, y - 10), 
+                    cv2.FONT_HERSHEY_SIMPLEX, 0.7, color, 2)
+
+    cv2.imshow("High Accuracy Detection", frame)
+    if cv2.waitKey(1) & 0xFF == 27: break
+
+picam2.stop()
+cv2.destroyAllWindows()
